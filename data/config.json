@@ -1,0 +1,52 @@
+{
+  "sweep": {
+    "submarkets": [
+      "Gwinnett County, GA",
+      "I-85 North Corridor, GA",
+      "South Atlanta / Clayton County, GA",
+      "Charlotte Metro, NC",
+      "Nashville Metro, TN"
+    ],
+    "asset_types": [
+      "Industrial",
+      "Flex / R&D"
+    ],
+    "deal_size": "$10M–$70M",
+    "building_size": "25,000–200,000 SF",
+    "priority_signal": "Debt maturity / bridge stress",
+    "max_targets_per_submarket": 3
+  },
+  "dossier": {
+    "auto_run": true,
+    "min_conviction": "High Conviction",
+    "sections": [
+      "Owner Intelligence",
+      "Debt Profile",
+      "Submarket Context",
+      "Comparable Sales",
+      "Tenant & Rent Roll",
+      "Supply Pipeline",
+      "Physical Asset Intel",
+      "Basis & Outreach Angle"
+    ]
+  },
+  "output": {
+    "reports_folder": "reports",
+    "filename_prefix": "RIDGE-SCOUT",
+    "include_timestamp": true,
+    "generate_index": true
+  },
+  "ridge_profile": {
+    "target_yoc": "7.5–8.0%",
+    "target_irr": "12–16%",
+    "hold_period": "5 years",
+    "focus_region": "Southeast US",
+    "drop_criteria": [
+      "Institutional owner",
+      "Listed in last 90 days",
+      "Under 15,000 SF",
+      "Hold under 4 years",
+      "Sale within 24 months"
+    ]
+  }
+}
