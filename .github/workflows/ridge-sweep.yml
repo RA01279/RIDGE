@@ -39,7 +39,7 @@ jobs:
       # ── 3. Run the sweep script ─────────────────────────────────────────
       - name: Run RIDGE SCOUT Sweep + Dossier
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.RIDGEAPI }}
         run: |
           echo "🔍 Starting RIDGE SCOUT run at $(date)"
           node scripts/run-sweep.js
