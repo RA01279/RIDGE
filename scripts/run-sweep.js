@@ -27,47 +27,67 @@ const DATE_STR = RUN_DATE.toISOString().split('T')[0]; // e.g. 2026-03-09
 const TIME_STR = RUN_DATE.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' });
 
 // ── Claude API helper ───────────────────────────────────────────────────────
-function callClaude(system, userPrompt, maxTokens = 4000, useSearch = true) {
-  return new Promise((resolve, reject) => {
-    const tools = useSearch ? [{ type: 'web_search_20250305', name: 'web_search' }] : [];
-    const body = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content: userPrompt }],
-      ...(useSearch ? { tools } : {})
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function callClaude(system, userPrompt, maxTokens = 4000, useSearch = true, retries = 5) {
+  const tools = useSearch ? [{ type: 'web_search_20250305', name: 'web_search' }] : [];
+  const body = JSON.stringify({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: 'user', content: userPrompt }],
+    ...(useSearch ? { tools } : {})
+  });
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'web-search-2025-03-05',
+          'Content-Length': Buffer.byteLength(body)
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) {
+              if (parsed.error.type === 'rate_limit_error') {
+                resolve({ rateLimited: true, message: parsed.error.message });
+              } else {
+                reject(new Error(parsed.error.message));
+              }
+            } else {
+              const text = parsed.content
+                .filter(b => b.type === 'text')
+                .map(b => b.text)
+                .join('\n');
+              resolve({ ok: true, text });
+            }
+          } catch(e) { reject(e); }
+        });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
     });
 
-    const req = https.request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'web-search-2025-03-05',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) return reject(new Error(parsed.error.message));
-          const text = parsed.content
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
-            .join('\n');
-          resolve(text);
-        } catch(e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+    if (result.ok) return result.text;
+
+    if (result.rateLimited) {
+      const waitSec = attempt * 65; // 65s, 130s, 195s ... — clears the 1-min token window
+      console.log(`  ⏳ Rate limited (attempt ${attempt}/${retries}). Waiting ${waitSec}s before retry...`);
+      await sleep(waitSec * 1000);
+    }
+  }
+  throw new Error('Rate limit exceeded after ' + retries + ' retries.');
 }
 
 // ── System prompts ──────────────────────────────────────────────────────────
@@ -275,8 +295,13 @@ async function main() {
 
   let allReportFiles = [];
 
-  for (const submarket of submarkets) {
-    console.log(`\n━━━ SCOUT SWEEP: ${submarket} ━━━`);
+  for (let si = 0; si < submarkets.length; si++) {
+    const submarket = submarkets[si];
+    if (si > 0) {
+      console.log('  ⏳ Pausing 70s between submarkets to respect rate limits...');
+      await sleep(70000);
+    }
+    console.log(`\n━━━ SCOUT SWEEP: ${submarket} (${si+1}/${submarkets.length}) ━━━`);
 
     // ── Step 1: Sweep ──────────────────────────────────────────────────────
     const sweepPrompt = `Run a SCOUT Submarket Sweep for RIDGE.
