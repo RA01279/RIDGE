@@ -133,6 +133,13 @@ select option{background:var(--surface)}
 @media(max-width:900px){.cards{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:768px){.cards{grid-template-columns:repeat(2,1fr)}.fg{grid-template-columns:1fr}.fg3{grid-template-columns:1fr 1fr}main{padding:24px 16px 60px}}
 @media(max-width:480px){.cards{grid-template-columns:1fr}.fg3{grid-template-columns:1fr}}
+
+  .api-key-wrap{display:flex;align-items:center;gap:8px;margin-left:16px}
+  .api-key-wrap label{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);white-space:nowrap;margin-bottom:0}
+  .api-key-input{background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:5px 10px;outline:none;width:220px;font-family:monospace;transition:border-color .15s}
+  .api-key-input:focus{border-color:var(--accent)}
+  .api-key-input.set{border-color:var(--green);color:var(--green)}
+  .api-key-status{font-size:10px;color:var(--dim);white-space:nowrap}
 </style>
 </head>
 <body>
@@ -142,6 +149,7 @@ select option{background:var(--surface)}
     <span class="logo-text">RIDGE</span>
   </div>
   <div class="hdr-right"><span class="dot"></span> AI Tools Active</div>
+<div class="api-key-wrap"><label for="api-key-input">API Key</label><input class="api-key-input" id="api-key-input" type="password" placeholder="sk-ant-..." oninput="onApiKeyInput(this)" autocomplete="off" spellcheck="false"><span class="api-key-status" id="api-key-status">Not set</span></div>
 </header>
 <main>
 
@@ -769,10 +777,35 @@ function mdToHTML(md){
   return h;
 }
 
-function callClaude(system,content,useSearch,maxTok){
+
+  function onApiKeyInput(el){
+    var val = el.value.trim();
+    var status = document.getElementById('api-key-status');
+    if(val.startsWith('sk-ant-') && val.length > 20){
+      el.classList.add('set');
+      status.textContent = '✓ Key set';
+      status.style.color = 'var(--green)';
+    } else if(val.length > 0) {
+      el.classList.remove('set');
+      status.textContent = 'Invalid key';
+      status.style.color = 'var(--red)';
+    } else {
+      el.classList.remove('set');
+      status.textContent = 'Not set';
+      status.style.color = 'var(--dim)';
+    }
+  }
+  function getApiKey(){
+    var key = (document.getElementById('api-key-input')||{}).value||'';
+    return key.trim();
+  }
+
+  function callClaude(system,content,useSearch,maxTok){
   var body={model:'claude-sonnet-4-20250514',max_tokens:maxTok||4000,system:system,messages:[{role:'user',content:content}]};
   if(useSearch)body.tools=[{type:'web_search_20250305',name:'web_search'}];
-  return fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  var apiKey=getApiKey();
+  if(!apiKey){return Promise.reject(new Error('No API key set. Please enter your Anthropic API key in the header.'));}
+  return fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify(body)})
     .then(function(r){return r.json().then(function(d){
       if(!r.ok)throw new Error(d.error&&d.error.message||'API error');
       return d.content.filter(function(b){return b.type==='text';}).map(function(b){return b.text;}).join('\n');
