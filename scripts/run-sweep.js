@@ -27,47 +27,67 @@ const DATE_STR = RUN_DATE.toISOString().split('T')[0]; // e.g. 2026-03-09
 const TIME_STR = RUN_DATE.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' });
 
 // ── Claude API helper ───────────────────────────────────────────────────────
-function callClaude(system, userPrompt, maxTokens = 4000, useSearch = true) {
-  return new Promise((resolve, reject) => {
-    const tools = useSearch ? [{ type: 'web_search_20250305', name: 'web_search' }] : [];
-    const body = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content: userPrompt }],
-      ...(useSearch ? { tools } : {})
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function callClaude(system, userPrompt, maxTokens = 4000, useSearch = true, retries = 5) {
+  const tools = useSearch ? [{ type: 'web_search_20250305', name: 'web_search' }] : [];
+  const body = JSON.stringify({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: 'user', content: userPrompt }],
+    ...(useSearch ? { tools } : {})
+  });
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'web-search-2025-03-05',
+          'Content-Length': Buffer.byteLength(body)
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) {
+              if (parsed.error.type === 'rate_limit_error') {
+                resolve({ rateLimited: true, message: parsed.error.message });
+              } else {
+                reject(new Error(parsed.error.message));
+              }
+            } else {
+              const text = parsed.content
+                .filter(b => b.type === 'text')
+                .map(b => b.text)
+                .join('\n');
+              resolve({ ok: true, text });
+            }
+          } catch(e) { reject(e); }
+        });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
     });
 
-    const req = https.request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'web-search-2025-03-05',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) return reject(new Error(parsed.error.message));
-          const text = parsed.content
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
-            .join('\n');
-          resolve(text);
-        } catch(e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+    if (result.ok) return result.text;
+
+    if (result.rateLimited) {
+      const waitSec = attempt * 65; // 65s, 130s, 195s ... — clears the 1-min token window
+      console.log(`  ⏳ Rate limited (attempt ${attempt}/${retries}). Waiting ${waitSec}s before retry...`);
+      await sleep(waitSec * 1000);
+    }
+  }
+  throw new Error('Rate limit exceeded after ' + retries + ' retries.');
 }
 
 // ── System prompts ──────────────────────────────────────────────────────────
@@ -269,17 +289,55 @@ td{padding:10px 12px;border-bottom:1px solid #1c2330;font-size:13px}a{color:#e8c
   console.log('Updated reports/index.html');
 }
 
+// ── Submarket Rotation ──────────────────────────────────────────────────────
+// Mon/Wed/Fri schedule: rotates through all submarkets one at a time.
+// Week A:  Mon=idx0, Wed=idx1, Fri=idx2
+// Week B:  Mon=idx3, Wed=idx4, Fri=idx0  ... and so on cyclically.
+// Manual override: set SUBMARKET_OVERRIDE env var to target a specific one.
+function pickSubmarket(submarkets) {
+  // Allow manual override from workflow_dispatch input
+  const override = process.env.SUBMARKET_OVERRIDE || '';
+  if (override.trim()) {
+    const match = submarkets.find(s => s.toLowerCase().includes(override.toLowerCase().trim()));
+    if (match) { console.log(`  ↳ Manual override: ${match}`); return match; }
+    // If override doesn't match a known submarket, treat it as a custom one
+    console.log(`  ↳ Custom override: ${override.trim()}`);
+    return override.trim();
+  }
+
+  // Auto-rotate: use ISO week number + day-of-week to pick index
+  const now = RUN_DATE;
+  const dayOfWeek = now.getUTCDay(); // 0=Sun,1=Mon,...,5=Fri
+  // Get ISO week number
+  const jan4 = new Date(Date.UTC(now.getUTCFullYear(), 0, 4));
+  const weekNum = Math.ceil(((now - jan4) / 86400000 + jan4.getUTCDay() + 1) / 7);
+
+  // Map Mon=0, Wed=1, Fri=2 slot within the week
+  const daySlot = dayOfWeek === 1 ? 0 : dayOfWeek === 3 ? 1 : 2;
+
+  // Global slot = (weekNum * 3 + daySlot) mod total submarkets
+  const totalSlots = weekNum * 3 + daySlot;
+  const idx = totalSlots % submarkets.length;
+
+  console.log(`  ↳ Week ${weekNum}, day slot ${daySlot} → submarket index ${idx}: ${submarkets[idx]}`);
+  return submarkets[idx];
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   const { submarkets, asset_types, deal_size, building_size, priority_signal, max_targets_per_submarket } = config.sweep;
 
+  // Pick exactly ONE submarket for this run
+  const submarket = pickSubmarket(submarkets);
+  console.log(`\n🎯 THIS RUN: ${submarket}`);
+  console.log(`   (Running 1 submarket per session to stay within free-tier rate limits)`);
+
   let allReportFiles = [];
 
-  for (const submarket of submarkets) {
-    console.log(`\n━━━ SCOUT SWEEP: ${submarket} ━━━`);
+  // ── Step 1: Sweep ──────────────────────────────────────────────────────────
+  console.log(`\n━━━ SCOUT SWEEP: ${submarket} ━━━`);
 
-    // ── Step 1: Sweep ──────────────────────────────────────────────────────
-    const sweepPrompt = `Run a SCOUT Submarket Sweep for RIDGE.
+  const sweepPrompt = `Run a SCOUT Submarket Sweep for RIDGE.
 Target Submarket: ${submarket}
 Asset Types: ${asset_types.join(', ')}
 Deal Size: ${deal_size}
@@ -298,24 +356,35 @@ Execute the full 6-step research sequence:
 Output the full Prospect Table. Flag top targets with one-line rationale.
 Then output the targets JSON block as instructed.`;
 
-    let sweepOutput;
-    try {
-      sweepOutput = await callClaude(SCOUT_SYS, sweepPrompt, 4000, true);
-      console.log(`  ✓ Sweep complete (${sweepOutput.length} chars)`);
-    } catch(e) {
-      console.error(`  ✗ Sweep failed: ${e.message}`);
-      continue;
+  let sweepOutput;
+  try {
+    sweepOutput = await callClaude(SCOUT_SYS, sweepPrompt, 4000, true);
+    console.log(`  ✓ Sweep complete (${sweepOutput.length} chars)`);
+  } catch(e) {
+    console.error(`  ✗ Sweep failed: ${e.message}`);
+    updateReportsIndex();
+    process.exit(0); // Exit cleanly — don't fail the workflow
+  }
+
+  // ── Step 2: Parse targets ──────────────────────────────────────────────────
+  const targets = parseTargets(sweepOutput);
+  console.log(`  → ${targets.length} High Conviction target(s) found`);
+
+  // ── Step 3: Dossier each target (max 2 to stay in rate limits) ─────────────
+  const cap = Math.min(targets.length, max_targets_per_submarket, 2);
+  const dossiers = [];
+
+  for (let ti = 0; ti < cap; ti++) {
+    const target = targets[ti];
+    console.log(`  ┌ Dossier ${ti+1}/${cap}: ${target.address}`);
+
+    // Brief pause between calls to let the token bucket refill
+    if (ti > 0) {
+      console.log('  ⏳ Pausing 75s between dossiers...');
+      await sleep(75000);
     }
 
-    // ── Step 2: Parse targets ──────────────────────────────────────────────
-    const targets = parseTargets(sweepOutput);
-    console.log(`  → ${targets.length} High Conviction target(s) found`);
-
-    // ── Step 3: Dossier each target ────────────────────────────────────────
-    const dossiers = [];
-    for (const target of targets.slice(0, max_targets_per_submarket)) {
-      console.log(`  ┌ Dossier: ${target.address}`);
-      const dossierPrompt = `Run a full SCOUT Property Dossier for RIDGE.
+    const dossierPrompt = `Run a full SCOUT Property Dossier for RIDGE.
 
 PROPERTY: ${target.address}
 ASSET TYPE: ${asset_types.join(' / ')}
@@ -334,32 +403,31 @@ DATE: ${DATE_STR}
 ## SCOUT Summary
 Overall SCOUT Signal Rating and RIDGE Recommended Next Step.`;
 
-      try {
-        const dossierMD = await callClaude(DOSSIER_SYS, dossierPrompt, 6000, true);
-        dossiers.push({ ...target, name: target.name || target.address, markdown: dossierMD });
-        console.log(`  └ ✓ Dossier complete (${dossierMD.length} chars)`);
-      } catch(e) {
-        console.error(`  └ ✗ Dossier failed: ${e.message}`);
-      }
+    try {
+      const dossierMD = await callClaude(DOSSIER_SYS, dossierPrompt, 5000, true);
+      dossiers.push({ ...target, name: target.name || target.address, markdown: dossierMD });
+      console.log(`  └ ✓ Dossier complete (${dossierMD.length} chars)`);
+    } catch(e) {
+      console.error(`  └ ✗ Dossier failed: ${e.message}`);
     }
-
-    // ── Step 4: Build HTML report ──────────────────────────────────────────
-    const safeSubmarket = submarket.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-    const filename = `RIDGE-SCOUT_${DATE_STR}_${safeSubmarket}.html`;
-    const reportPath = path.join(REPORTS_DIR, filename);
-    const title = `SCOUT Report — ${submarket} — ${DATE_STR}`;
-    const html = buildReportHTML(title, submarket, sweepOutput, dossiers);
-
-    fs.writeFileSync(reportPath, html, 'utf8');
-    console.log(`  ✓ Report saved: reports/${filename}`);
-    allReportFiles.push(filename);
   }
 
-  // ── Step 5: Update index ──────────────────────────────────────────────────
+  // ── Step 4: Build HTML report ──────────────────────────────────────────────
+  const safeSubmarket = submarket.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+  const filename = `RIDGE-SCOUT_${DATE_STR}_${safeSubmarket}.html`;
+  const reportPath = path.join(REPORTS_DIR, filename);
+  const title = `SCOUT Report — ${submarket} — ${DATE_STR}`;
+  const html = buildReportHTML(title, submarket, sweepOutput, dossiers);
+
+  fs.writeFileSync(reportPath, html, 'utf8');
+  console.log(`\n  ✓ Report saved: reports/${filename}`);
+  allReportFiles.push(filename);
+
+  // ── Step 5: Update index ───────────────────────────────────────────────────
   updateReportsIndex();
 
-  console.log(`\n✅ RIDGE SCOUT run complete. ${allReportFiles.length} report(s) generated.`);
-  console.log('Reports:', allReportFiles.join(', '));
+  console.log(`\n✅ RIDGE SCOUT run complete. Report: ${filename}`);
+  console.log(`   Next submarket up on next scheduled run.`);
 }
 
 main().catch(err => {
